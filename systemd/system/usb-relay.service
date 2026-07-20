@@ -1,0 +1,17 @@
+[Unit]
+Description=USB relay state across boot and shutdown
+Documentation=man:systemd.service(5)
+After=systemd-udev-settle.service
+Wants=systemd-udev-settle.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/usb-relay on --wait
+ExecStop=/usr/local/sbin/usb-relay off --no-wait
+TimeoutStartSec=20
+TimeoutStopSec=10
+
+[Install]
+WantedBy=multi-user.target
+

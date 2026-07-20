@@ -1,0 +1,12 @@
+[Unit]
+Description=GPU Control Daemon (via Flatpak)
+
+[Service]
+EnvironmentFile=/etc/steamos-scripts/lactd.env
+ExecStartPre=/usr/bin/test -r "${LACT_DAEMON_PATH}"
+ExecStart=/usr/bin/bash "${LACT_DAEMON_PATH}"
+Nice=-10
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target        

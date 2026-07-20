@@ -1,0 +1,16 @@
+[Unit]
+Description=USB relay state across system sleep
+Before=sleep.target
+StopWhenUnneeded=yes
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=-/usr/local/sbin/usb-relay off --wait
+ExecStop=-/usr/local/sbin/usb-relay on --wait
+TimeoutStartSec=10
+TimeoutStopSec=20
+
+[Install]
+WantedBy=sleep.target
+

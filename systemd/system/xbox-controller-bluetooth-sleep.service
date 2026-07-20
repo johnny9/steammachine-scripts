@@ -1,0 +1,12 @@
+[Unit]
+Description=Rearm Bluetooth Xbox and USB GameSir controller wake before sleep
+Before=sleep.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/steamos-scripts/controller-wake.env
+ExecStart=/usr/local/sbin/xbox-controller-bluetooth-wake pre-suspend
+TimeoutStartSec=10
+
+[Install]
+WantedBy=sleep.target

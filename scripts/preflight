@@ -1,0 +1,295 @@
+#!/usr/bin/env bash
+set -u
+
+CONFIG_DIR="${CONFIG_DIR:-/etc/steamos-scripts}"
+failures=0
+
+ok() {
+    printf 'ok: %s\n' "$*"
+}
+
+fail() {
+    printf 'error: %s\n' "$*" >&2
+    failures=$((failures + 1))
+}
+
+require_command() {
+    if command -v "$1" >/dev/null 2>&1; then
+        ok "found command: $1"
+    else
+        fail "required command is unavailable: $1"
+    fi
+}
+
+load_config() {
+    local config="$CONFIG_DIR/$1"
+
+    if [ ! -r "$config" ]; then
+        fail "configuration is missing or unreadable: $config"
+        return 1
+    fi
+
+    # Configuration files are root-owned shell-compatible environment files.
+    set -a
+    # shellcheck disable=SC1090
+    if ! . "$config"; then
+        set +a
+        fail "configuration could not be parsed: $config"
+        return 1
+    fi
+    set +a
+    ok "loaded configuration: $config"
+}
+
+positive_integer() {
+    local name="$1"
+    local value="$2"
+
+    if [[ "$value" =~ ^[0-9]+$ ]] && (( 10#$value > 0 )); then
+        ok "$name is configured"
+    else
+        fail "$name must be a positive integer"
+    fi
+}
+
+non_negative_integer() {
+    local name="$1"
+    local value="$2"
+
+    if [[ "$value" =~ ^[0-9]+$ ]]; then
+        ok "$name is configured"
+    else
+        fail "$name must be a non-negative integer"
+    fi
+}
+
+check_usb_relay() {
+    local device vendor product sys
+    local found=0
+
+    load_config usb-relay.env || return
+    device="${RELAY_DEVICE:-}"
+    vendor="${RELAY_USB_VENDOR:-}"
+    product="${RELAY_USB_PRODUCT:-}"
+    vendor="${vendor,,}"
+    product="${product,,}"
+
+    require_command stty
+    require_command logger
+    require_command tr
+    non_negative_integer RELAY_WAIT_SECONDS "${RELAY_WAIT_SECONDS:-}"
+
+    case "$device" in
+        auto)
+            if [[ ! "$vendor" =~ ^[[:xdigit:]]{4}$ ]] ||
+               [[ ! "$product" =~ ^[[:xdigit:]]{4}$ ]]; then
+                fail "relay auto discovery requires four-digit USB vendor and product IDs"
+                return
+            fi
+
+            for sys in /sys/class/tty/ttyUSB*/device; do
+                [ -e "$sys" ] || continue
+                if [ "$(cat "$sys/../../idVendor" 2>/dev/null)" = "$vendor" ] &&
+                   [ "$(cat "$sys/../../idProduct" 2>/dev/null)" = "$product" ]; then
+                    found=1
+                    break
+                fi
+            done
+            if [ "$found" -eq 1 ]; then
+                ok "found configured USB relay $vendor:$product"
+            else
+                fail "configured USB relay $vendor:$product is not attached"
+            fi
+            ;;
+        /dev/*)
+            if [ -c "$device" ]; then
+                ok "relay device exists: $device"
+            else
+                fail "relay device is not a character device: $device"
+            fi
+            ;;
+        *) fail "RELAY_DEVICE must be an absolute /dev path or 'auto'" ;;
+    esac
+}
+
+check_ryzenadj() {
+    load_config ryzenadj.env || return
+    if [ -x /usr/bin/ryzenadj ]; then
+        ok "found executable: /usr/bin/ryzenadj"
+    else
+        fail "required executable is unavailable: /usr/bin/ryzenadj"
+    fi
+    positive_integer RYZENADJ_BOOT_LIMIT_MW "${RYZENADJ_BOOT_LIMIT_MW:-}"
+    positive_integer RYZENADJ_RESUME_LIMIT_MW "${RYZENADJ_RESUME_LIMIT_MW:-}"
+}
+
+check_controller_wake() {
+    local device id paired timeout_seconds vendor product
+    local found
+
+    load_config controller-wake.env || return
+    require_command bluetoothctl
+    require_command timeout
+    require_command logger
+    require_command systemctl
+    timeout_seconds="${BTCTL_TIMEOUT_SECONDS:-}"
+    non_negative_integer BTCTL_TIMEOUT_SECONDS "$timeout_seconds"
+    if [[ ! "$timeout_seconds" =~ ^[0-9]+$ ]]; then
+        timeout_seconds=6
+    fi
+
+    if [ -n "${CONTROLLER_MAC:-}" ] &&
+       [[ ! "${CONTROLLER_MAC}" =~ ^([[:xdigit:]]{2}:){5}[[:xdigit:]]{2}$ ]]; then
+        fail "CONTROLLER_MAC is not a valid Bluetooth MAC address"
+    fi
+    if { [ -n "${BT_USB_VENDOR:-}" ] && [ -z "${BT_USB_PRODUCT:-}" ]; } ||
+       { [ -z "${BT_USB_VENDOR:-}" ] && [ -n "${BT_USB_PRODUCT:-}" ]; }; then
+        fail "BT_USB_VENDOR and BT_USB_PRODUCT must be configured together"
+    fi
+
+    for id in "${BT_USB_VENDOR:-}" "${BT_USB_PRODUCT:-}" "${GAMESIR_USB_VENDOR:-}"; do
+        if [ -n "$id" ] && [[ ! "$id" =~ ^[[:xdigit:]]{4}$ ]]; then
+            fail "USB ID '$id' must contain four hexadecimal digits"
+        fi
+    done
+
+    if systemctl is-active --quiet bluetooth.service; then
+        ok "Bluetooth service is active"
+    else
+        fail "Bluetooth service is not active"
+    fi
+
+    if [ -n "${CONTROLLER_MAC:-}" ] && command -v bluetoothctl >/dev/null 2>&1; then
+        if timeout "${timeout_seconds}s" bluetoothctl info "${CONTROLLER_MAC}" >/dev/null 2>&1; then
+            ok "configured Bluetooth controller is known to BlueZ"
+        else
+            fail "configured Bluetooth controller is not known to BlueZ"
+        fi
+    elif command -v bluetoothctl >/dev/null 2>&1; then
+        paired="$(timeout "${timeout_seconds}s" bluetoothctl devices Paired 2>/dev/null || true)"
+        if [[ "${paired,,}" == *xbox* ]] || [[ "${paired,,}" == *x-box* ]]; then
+            ok "found a paired Xbox controller by name"
+        else
+            fail "CONTROLLER_MAC is blank and no paired Xbox controller was found by name"
+        fi
+    fi
+
+    if [ -n "${BT_USB_VENDOR:-}" ] && [ -n "${BT_USB_PRODUCT:-}" ]; then
+        found=0
+        vendor="${BT_USB_VENDOR,,}"
+        product="${BT_USB_PRODUCT,,}"
+        for device in /sys/bus/usb/devices/*; do
+            [ -r "$device/idVendor" ] || continue
+            [ -r "$device/idProduct" ] || continue
+            if [ "$(cat "$device/idVendor")" = "$vendor" ] &&
+               [ "$(cat "$device/idProduct")" = "$product" ]; then
+                found=1
+                break
+            fi
+        done
+        if [ "$found" -eq 1 ]; then
+            ok "found configured Bluetooth USB adapter $vendor:$product"
+        else
+            fail "configured Bluetooth USB adapter $vendor:$product is not attached"
+        fi
+    fi
+
+    if [ -n "${GAMESIR_USB_VENDOR:-}" ]; then
+        found=0
+        vendor="${GAMESIR_USB_VENDOR,,}"
+        for device in /sys/bus/usb/devices/*; do
+            [ -r "$device/idVendor" ] || continue
+            if [ "$(cat "$device/idVendor")" = "$vendor" ]; then
+                found=1
+                break
+            fi
+        done
+        if [ "$found" -eq 1 ]; then
+            ok "found configured GameSir USB vendor $vendor"
+        else
+            fail "configured GameSir USB vendor $vendor is not attached"
+        fi
+    fi
+}
+
+check_ram_led() {
+    require_command flatpak
+    require_command awk
+    require_command timeout
+    if command -v flatpak >/dev/null 2>&1 &&
+       flatpak info org.openrgb.OpenRGB >/dev/null 2>&1; then
+        ok "OpenRGB Flatpak is installed for the current user"
+    else
+        fail "OpenRGB Flatpak org.openrgb.OpenRGB is unavailable to the current user"
+    fi
+}
+
+check_lactd() {
+    load_config lactd.env || return
+    require_command flatpak
+    if [ -z "${FLATPAK_INSTALL_USER:-}" ]; then
+        fail "FLATPAK_INSTALL_USER is required"
+    elif id "${FLATPAK_INSTALL_USER}" >/dev/null 2>&1; then
+        ok "LACT Flatpak user exists: ${FLATPAK_INSTALL_USER}"
+    else
+        fail "LACT Flatpak user does not exist: ${FLATPAK_INSTALL_USER}"
+    fi
+
+    if [ -r "${LACT_DAEMON_PATH:-}" ]; then
+        ok "LACT daemon is readable: ${LACT_DAEMON_PATH}"
+    else
+        fail "LACT daemon is missing or unreadable: ${LACT_DAEMON_PATH:-<unset>}"
+    fi
+}
+
+check_plugin_loader() {
+    load_config plugin-loader.env || return
+    if [ -x "${PLUGIN_LOADER_PATH:-}" ]; then
+        ok "PluginLoader is executable: ${PLUGIN_LOADER_PATH}"
+    else
+        fail "PluginLoader is missing or not executable: ${PLUGIN_LOADER_PATH:-<unset>}"
+    fi
+    if [ -d "${PLUGIN_LOADER_WORKING_DIRECTORY:-}" ]; then
+        ok "PluginLoader working directory exists: ${PLUGIN_LOADER_WORKING_DIRECTORY}"
+    else
+        fail "PluginLoader working directory is missing: ${PLUGIN_LOADER_WORKING_DIRECTORY:-<unset>}"
+    fi
+    if [ -d "${UNPRIVILEGED_PATH:-}" ]; then
+        ok "PluginLoader unprivileged path exists: ${UNPRIVILEGED_PATH}"
+    else
+        fail "PluginLoader unprivileged path is missing: ${UNPRIVILEGED_PATH:-<unset>}"
+    fi
+    if [ -d "${PRIVILEGED_PATH:-}" ]; then
+        ok "PluginLoader privileged path exists: ${PRIVILEGED_PATH}"
+    else
+        fail "PluginLoader privileged path is missing: ${PRIVILEGED_PATH:-<unset>}"
+    fi
+    [ -n "${LOG_LEVEL:-}" ] || fail "LOG_LEVEL is required"
+}
+
+usage() {
+    printf 'usage: %s {usb-relay|ryzenadj|controller-wake|ram-led|lactd|plugin-loader} [...]\n' "$0" >&2
+    exit 2
+}
+
+[ "$#" -gt 0 ] || usage
+
+for feature in "$@"; do
+    printf '\n[%s]\n' "$feature"
+    case "$feature" in
+        usb-relay) check_usb_relay ;;
+        ryzenadj) check_ryzenadj ;;
+        controller-wake) check_controller_wake ;;
+        ram-led) check_ram_led ;;
+        lactd) check_lactd ;;
+        plugin-loader) check_plugin_loader ;;
+        *) fail "unknown feature: $feature" ;;
+    esac
+done
+
+if [ "$failures" -ne 0 ]; then
+    printf '\npreflight failed with %d error(s)\n' "$failures" >&2
+    exit 1
+fi
+
+printf '\npreflight passed\n'

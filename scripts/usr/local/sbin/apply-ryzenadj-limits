@@ -1,0 +1,30 @@
+#!/bin/sh
+set -eu
+
+mode=${1:-}
+
+case "$mode" in
+    boot) limit=${RYZENADJ_BOOT_LIMIT_MW:-} ;;
+    resume) limit=${RYZENADJ_RESUME_LIMIT_MW:-} ;;
+    *)
+        echo "usage: $0 {boot|resume}" >&2
+        exit 2
+        ;;
+esac
+
+case "$limit" in
+    ""|*[!0-9]*)
+        echo "ryzenadj: configured $mode limit must be a positive integer in milliwatt" >&2
+        exit 1
+        ;;
+esac
+
+if [ "$limit" -eq 0 ]; then
+    echo "ryzenadj: configured $mode limit must be greater than zero" >&2
+    exit 1
+fi
+
+exec /usr/bin/ryzenadj \
+    --stapm-limit="$limit" \
+    --fast-limit="$limit" \
+    --slow-limit="$limit"

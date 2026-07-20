@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+# Steam can export a 32-bit preload library into the desktop environment.
+# It is unrelated to OpenRGB and produces loader errors in this 64-bit script.
+unset LD_PRELOAD
+
+readonly OPENRGB_APP="org.openrgb.OpenRGB"
+readonly EXPECTED_DRAM_DEVICES=2
+
+device_list="$(
+    /usr/bin/timeout 30s /usr/bin/flatpak run "$OPENRGB_APP" \
+        --noautoconnect --list-devices 2>&1
+)"
+
+mapfile -t dram_devices < <(
+    /usr/bin/awk '
+        /^[[:digit:]]+: / {
+            device = $1
+            sub(/:$/, "", device)
+        }
+        /^[[:space:]]*Type:[[:space:]]*DRAM[[:space:]]*$/ {
+            print device
+        }
+    ' <<<"$device_list"
+)
+
+if (( ${#dram_devices[@]} != EXPECTED_DRAM_DEVICES )); then
+    printf 'Expected %d DRAM RGB controllers, found %d; no LEDs were changed.\n' \
+        "$EXPECTED_DRAM_DEVICES" "${#dram_devices[@]}" >&2
+    printf '%s\n' "$device_list" >&2
+    exit 1
+fi
+
+openrgb_args=(--noautoconnect)
+for device in "${dram_devices[@]}"; do
+    openrgb_args+=(--device "$device" --mode off)
+done
+
+/usr/bin/timeout 30s /usr/bin/flatpak run "$OPENRGB_APP" "${openrgb_args[@]}"
+

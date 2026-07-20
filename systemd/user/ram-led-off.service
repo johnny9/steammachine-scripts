@@ -1,0 +1,11 @@
+[Unit]
+Description=Turn off RGB LEDs on both RAM sticks
+Documentation=https://openrgb.org/
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/ram-led-off
+
+[Install]
+WantedBy=default.target
+

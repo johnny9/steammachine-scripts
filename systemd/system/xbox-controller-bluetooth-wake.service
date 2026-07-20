@@ -1,0 +1,13 @@
+[Unit]
+Description=Enable Bluetooth Xbox and USB GameSir controller wake
+After=bluetooth.service
+Wants=bluetooth.service
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/steamos-scripts/controller-wake.env
+ExecStart=/usr/local/sbin/xbox-controller-bluetooth-wake enable
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,14 @@
+[Unit]
+Description=SteamDeck Plugin Loader
+After=network.target
+[Service]
+Type=simple
+User=root
+Restart=always
+KillMode=process
+TimeoutStopSec=15
+EnvironmentFile=/etc/steamos-scripts/plugin-loader.env
+ExecStartPre=/bin/sh -c 'test -x "$$PLUGIN_LOADER_PATH" && test -d "$$PLUGIN_LOADER_WORKING_DIRECTORY" && test -d "$$UNPRIVILEGED_PATH" && test -d "$$PRIVILEGED_PATH"'
+ExecStart=/bin/sh -c 'cd "$$PLUGIN_LOADER_WORKING_DIRECTORY" && exec "$$PLUGIN_LOADER_PATH"'
+[Install]
+WantedBy=multi-user.target

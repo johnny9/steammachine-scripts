@@ -1,0 +1,10 @@
+[Unit]
+Description=Apply RyzenAdj power limits
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/steamos-scripts/ryzenadj.env
+ExecStart=/usr/local/sbin/apply-ryzenadj-limits boot
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,238 @@
+#!/usr/bin/env bash
+set -u
+
+# Configure controller and adapter IDs in /etc/steamos-scripts/controller-wake.env.
+# Leaving CONTROLLER_MAC unset enables wake for paired devices whose names contain
+# "xbox"; setting it also supports controllers BlueZ does not list after a reset.
+CONTROLLER_MAC="${CONTROLLER_MAC:-}"
+BT_USB_VENDOR="${BT_USB_VENDOR:-}"
+BT_USB_PRODUCT="${BT_USB_PRODUCT:-}"
+GAMESIR_USB_VENDOR="${GAMESIR_USB_VENDOR:-}"
+BTCTL_TIMEOUT_SECONDS="${BTCTL_TIMEOUT_SECONDS:-6}"
+LOG_TAG="${LOG_TAG:-xbox-bt-wake}"
+
+BT_USB_VENDOR="${BT_USB_VENDOR,,}"
+BT_USB_PRODUCT="${BT_USB_PRODUCT,,}"
+GAMESIR_USB_VENDOR="${GAMESIR_USB_VENDOR,,}"
+
+if [ -n "$CONTROLLER_MAC" ] &&
+   [[ ! "$CONTROLLER_MAC" =~ ^([[:xdigit:]]{2}:){5}[[:xdigit:]]{2}$ ]]; then
+    echo "invalid CONTROLLER_MAC: expected six colon-separated hexadecimal bytes" >&2
+    exit 1
+fi
+
+for usb_id in "$BT_USB_VENDOR" "$BT_USB_PRODUCT" "$GAMESIR_USB_VENDOR"; do
+    if [ -n "$usb_id" ] && [[ ! "$usb_id" =~ ^[[:xdigit:]]{4}$ ]]; then
+        echo "invalid USB ID '$usb_id': expected four hexadecimal digits" >&2
+        exit 1
+    fi
+done
+
+if { [ -n "$BT_USB_VENDOR" ] && [ -z "$BT_USB_PRODUCT" ]; } ||
+   { [ -z "$BT_USB_VENDOR" ] && [ -n "$BT_USB_PRODUCT" ]; }; then
+    echo "BT_USB_VENDOR and BT_USB_PRODUCT must be set together" >&2
+    exit 1
+fi
+
+if [[ ! "$BTCTL_TIMEOUT_SECONDS" =~ ^[0-9]+$ ]]; then
+    echo "BTCTL_TIMEOUT_SECONDS must be a non-negative integer" >&2
+    exit 1
+fi
+
+log() {
+    printf '%s\n' "$*"
+    logger -t "$LOG_TAG" -- "$*" >/dev/null 2>&1 || true
+}
+
+set_wakeup_file() {
+    local wake_file="$1"
+
+    if [ -w "$wake_file" ]; then
+        if printf enabled > "$wake_file"; then
+            log "enabled wakeup: $wake_file"
+        else
+            log "failed to write enabled to $wake_file"
+        fi
+    else
+        log "wakeup file is not writable: $wake_file"
+    fi
+}
+
+enable_wake_chain() {
+    local device="$1"
+    local label="$2"
+    local sysfs_path
+
+    sysfs_path="$(readlink -f -- "$device")" || {
+        log "$label: could not resolve sysfs path for $device"
+        return 1
+    }
+
+    # Enable every wake-capable node between the USB device and the PCI root.
+    # This covers the device, root hub, xHCI controller, and its PCI bridges.
+    while [ "$sysfs_path" != "/sys/devices" ] && [ "$sysfs_path" != "/" ]; do
+        if [ -e "$sysfs_path/power/wakeup" ]; then
+            set_wakeup_file "$sysfs_path/power/wakeup"
+        fi
+        sysfs_path="$(dirname -- "$sysfs_path")"
+    done
+}
+
+arm_bluetooth_adapter_wake() {
+    local device
+    local found=0
+
+    if [ -z "$BT_USB_VENDOR" ]; then
+        log "Bluetooth USB adapter scan is not configured"
+        return 0
+    fi
+
+    for device in /sys/bus/usb/devices/*; do
+        [ -r "$device/idVendor" ] || continue
+        [ -r "$device/idProduct" ] || continue
+
+        if [ "$(cat "$device/idVendor")" = "$BT_USB_VENDOR" ] && \
+           [ "$(cat "$device/idProduct")" = "$BT_USB_PRODUCT" ]; then
+            found=1
+            enable_wake_chain "$device" "Bluetooth adapter $BT_USB_VENDOR:$BT_USB_PRODUCT"
+        fi
+    done
+
+    if [ "$found" -eq 0 ]; then
+        log "Bluetooth USB adapter $BT_USB_VENDOR:$BT_USB_PRODUCT not found"
+    fi
+}
+
+arm_gamesir_wake() {
+    local device product
+    local found=0
+
+    if [ -z "$GAMESIR_USB_VENDOR" ]; then
+        log "GameSir USB scan is not configured"
+        return 0
+    fi
+
+    for device in /sys/bus/usb/devices/*; do
+        [ -r "$device/idVendor" ] || continue
+        [ "$(cat "$device/idVendor")" = "$GAMESIR_USB_VENDOR" ] || continue
+
+        found=1
+        product="unknown"
+        [ -r "$device/idProduct" ] && product="$(cat "$device/idProduct")"
+
+        if [ ! -e "$device/power/wakeup" ]; then
+            log "GameSir $GAMESIR_USB_VENDOR:$product does not expose device-level USB remote wake; arming its upstream wake chain"
+        fi
+        enable_wake_chain "$device" "GameSir $GAMESIR_USB_VENDOR:$product"
+    done
+
+    if [ "$found" -eq 0 ]; then
+        log "no attached GameSir USB devices found"
+    fi
+}
+
+bluetoothctl_run() {
+    local output status
+
+    if ! command -v bluetoothctl >/dev/null 2>&1; then
+        log "bluetoothctl is unavailable"
+        return 127
+    fi
+
+    output="$(timeout "${BTCTL_TIMEOUT_SECONDS}s" bluetoothctl "$@" 2>&1)"
+    status=$?
+    if [ "$status" -ne 0 ]; then
+        log "bluetoothctl $* failed (exit $status): ${output:-no output}"
+        return "$status"
+    fi
+}
+
+bluetoothctl_info() {
+    timeout "${BTCTL_TIMEOUT_SECONDS}s" bluetoothctl info "$1" 2>/dev/null
+}
+
+list_xbox_controller_macs() {
+    local devices kind mac name
+    local -A seen=()
+
+    # Keep an explicitly configured controller even if BlueZ does not return it
+    # from the paired-device listing during an adapter reset.
+    if [ -n "$CONTROLLER_MAC" ]; then
+        seen["$CONTROLLER_MAC"]=1
+    fi
+
+    devices="$(timeout "${BTCTL_TIMEOUT_SECONDS}s" bluetoothctl devices Paired 2>/dev/null)" || {
+        log "could not list paired Bluetooth devices; using configured controller only"
+    }
+
+    while read -r kind mac name; do
+        [ "$kind" = "Device" ] || continue
+        [ -n "$mac" ] || continue
+        case "${name,,}" in
+            *xbox*|*x-box*) seen["$mac"]=1 ;;
+        esac
+    done <<< "$devices"
+
+    printf '%s\n' "${!seen[@]}"
+}
+
+arm_xbox_controller_wake() {
+    local mac="$1"
+    local force_rearm="$2"
+    local info
+
+    log "arming BlueZ trust and wake for Xbox controller $mac"
+    bluetoothctl_run trust "$mac" || true
+
+    # A USB/HCI reset can discard the controller's kernel wake flag while
+    # BlueZ still reports WakeAllowed=yes. Cycling it forces BlueZ to send the
+    # flag again before the system enters suspend.
+    if [ "$force_rearm" = "yes" ]; then
+        bluetoothctl_run wake "$mac" off || true
+    fi
+    bluetoothctl_run wake "$mac" on || true
+
+    info="$(bluetoothctl_info "$mac")" || {
+        log "could not verify BlueZ wake state for $mac"
+        return 0
+    }
+    if [[ "$info" == *"WakeAllowed: yes"* ]]; then
+        log "verified BlueZ WakeAllowed=yes for $mac"
+    else
+        log "BlueZ did not report WakeAllowed=yes for $mac"
+    fi
+}
+
+arm_all_controller_wake() {
+    local force_rearm="$1"
+    local mac
+
+    arm_bluetooth_adapter_wake
+    arm_gamesir_wake
+
+    while read -r mac; do
+        [ -n "$mac" ] || continue
+        arm_xbox_controller_wake "$mac" "$force_rearm"
+    done < <(list_xbox_controller_macs)
+}
+
+case "${1:-enable}" in
+    enable)
+        log "enabling persistent controller wake"
+        arm_all_controller_wake no
+        ;;
+    connect)
+        log "post-resume reconnect is disabled to avoid disturbing other Bluetooth devices"
+        ;;
+    pre-suspend)
+        log "pre-suspend: rearming controller wake"
+        arm_all_controller_wake yes
+        ;;
+    post-resume)
+        log "post-resume reconnect is disabled to avoid disturbing other Bluetooth devices"
+        ;;
+    *)
+        echo "usage: $0 {enable|connect|pre-suspend|post-resume}" >&2
+        exit 2
+        ;;
+esac

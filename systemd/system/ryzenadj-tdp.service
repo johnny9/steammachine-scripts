@@ -1,0 +1,12 @@
+[Unit]
+Description=Reapply configured RyzenAdj CPU power limits after sleep
+ConditionPathExists=/usr/bin/ryzenadj
+After=systemd-suspend.service systemd-hibernate.service systemd-hybrid-sleep.service systemd-suspend-then-hibernate.service
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/steamos-scripts/ryzenadj.env
+ExecStart=/usr/local/sbin/apply-ryzenadj-limits resume
+
+[Install]
+WantedBy=suspend.target hibernate.target hybrid-sleep.target suspend-then-hibernate.target

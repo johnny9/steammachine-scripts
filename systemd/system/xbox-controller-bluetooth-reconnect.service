@@ -1,0 +1,7 @@
+[Unit]
+Description=Disabled Xbox controller Bluetooth reconnect shim
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/steamos-scripts/controller-wake.env
+ExecStart=/usr/local/sbin/xbox-controller-bluetooth-wake connect

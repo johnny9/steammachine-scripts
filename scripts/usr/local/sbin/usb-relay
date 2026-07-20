@@ -1,0 +1,152 @@
+#!/bin/sh
+set -eu
+
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+
+CONFIG_FILE=${USB_RELAY_CONFIG_FILE:-/etc/steamos-scripts/usb-relay.env}
+RELAY_DEVICE=${RELAY_DEVICE:-}
+RELAY_USB_VENDOR=${RELAY_USB_VENDOR:-}
+RELAY_USB_PRODUCT=${RELAY_USB_PRODUCT:-}
+RELAY_WAIT_SECONDS=${RELAY_WAIT_SECONDS:-10}
+TAG=usb-relay
+
+if [ -r "$CONFIG_FILE" ]; then
+    # shellcheck disable=SC1090
+    . "$CONFIG_FILE"
+fi
+
+RELAY_USB_VENDOR=$(printf '%s' "$RELAY_USB_VENDOR" | tr '[:upper:]' '[:lower:]')
+RELAY_USB_PRODUCT=$(printf '%s' "$RELAY_USB_PRODUCT" | tr '[:upper:]' '[:lower:]')
+
+case "$RELAY_DEVICE" in
+    "")
+        echo "$TAG: RELAY_DEVICE must be set in $CONFIG_FILE" >&2
+        exit 1
+        ;;
+    auto)
+        if [ -z "$RELAY_USB_VENDOR" ] || [ -z "$RELAY_USB_PRODUCT" ]; then
+            echo "$TAG: auto discovery requires RELAY_USB_VENDOR and RELAY_USB_PRODUCT" >&2
+            exit 1
+        fi
+        if [ "${#RELAY_USB_VENDOR}" -ne 4 ] || [ "${#RELAY_USB_PRODUCT}" -ne 4 ]; then
+            echo "$TAG: relay USB IDs must contain four hexadecimal digits" >&2
+            exit 1
+        fi
+        case "$RELAY_USB_VENDOR$RELAY_USB_PRODUCT" in
+            *[!0-9a-f]*)
+                echo "$TAG: relay USB IDs must contain four hexadecimal digits" >&2
+                exit 1
+                ;;
+        esac
+        ;;
+    /dev/*) ;;
+    *)
+        echo "$TAG: RELAY_DEVICE must be an absolute /dev path or 'auto'" >&2
+        exit 1
+        ;;
+esac
+
+case "$RELAY_WAIT_SECONDS" in
+    ""|*[!0-9]*)
+        echo "$TAG: RELAY_WAIT_SECONDS must be a non-negative integer" >&2
+        exit 1
+        ;;
+esac
+
+usage() {
+    echo "Usage: $0 on|off [--wait|--no-wait]" >&2
+    exit 2
+}
+
+ACTION=${1:-}
+[ -n "$ACTION" ] || usage
+shift || true
+
+WAIT=0
+case "${1:-}" in
+    --wait) WAIT=1 ;;
+    --no-wait|"") ;;
+    *) usage ;;
+esac
+
+log() {
+    logger -t "$TAG" "$*" 2>/dev/null || true
+    echo "$TAG: $*" >&2
+}
+
+is_configured_usb_tty() {
+    dev=$1
+    base=${dev##*/}
+    sys=/sys/class/tty/$base/device
+    [ -e "$sys" ] || return 1
+
+    vid=$(cat "$sys/../../idVendor" 2>/dev/null || true)
+    pid=$(cat "$sys/../../idProduct" 2>/dev/null || true)
+
+    [ "$vid" = "$RELAY_USB_VENDOR" ] && [ "$pid" = "$RELAY_USB_PRODUCT" ]
+}
+
+find_device_once() {
+    if [ "$RELAY_DEVICE" != auto ]; then
+        if [ -c "$RELAY_DEVICE" ]; then
+            printf '%s\n' "$RELAY_DEVICE"
+            return 0
+        fi
+        return 1
+    fi
+
+    for dev in /dev/ttyUSB*; do
+        [ -c "$dev" ] || continue
+        if is_configured_usb_tty "$dev"; then
+            printf '%s\n' "$dev"
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+find_device() {
+    if [ "$WAIT" -eq 0 ]; then
+        find_device_once
+        return
+    fi
+
+    deadline=$(( $(date +%s) + RELAY_WAIT_SECONDS ))
+    while :; do
+        if find_device_once; then
+            return 0
+        fi
+
+        [ "$(date +%s)" -ge "$deadline" ] && return 1
+        sleep 1
+    done
+}
+
+write_relay() {
+    dev=$1
+    bytes=$2
+
+    stty -F "$dev" 9600 cs8 -cstopb -parenb -ixon -ixoff -crtscts raw -echo
+    printf "$bytes" > "$dev"
+}
+
+case "$ACTION" in
+    on)
+        BYTES='\240\001\001\242'
+        ;;
+    off)
+        BYTES='\240\001\000\241'
+        ;;
+    *)
+        usage
+        ;;
+esac
+
+if ! DEV=$(find_device); then
+    log "device not found for action '$ACTION'"
+    exit 0
+fi
+
+write_relay "$DEV" "$BYTES"
+log "turned $ACTION via $DEV"
