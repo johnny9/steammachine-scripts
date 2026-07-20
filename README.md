@@ -26,6 +26,70 @@ When asked to install this repository, an agent must:
 | LACT daemon | `lactd.service` | `/etc/steamos-scripts/lactd.env` | Install LACT's Flatpak and configure its user and daemon path. |
 | PluginLoader | `plugin_loader.service` | `/etc/steamos-scripts/plugin-loader.env` | Install PluginLoader and configure its executable path. |
 
+## Installable Codex skills
+
+The `skills/` directory is the version-controlled source for these Codex skills:
+
+| Skill | Purpose |
+| --- | --- |
+| `install-steam-shortcut` | Add or update a local non-Steam shortcut and its library artwork. |
+| `add-switch-games-to-steam` | Add authorized local Switch dumps as individual Eden shortcuts. |
+| `install-steamdeck-game` | Deploy a local game to a Steam Deck and create its remote shortcut. |
+
+The skills are portable: their scripts contain no personal username, machine-specific home path, IP address, MAC address, Steam account ID, email address, or embedded credential value. `deck`, `/home/deck`, and `steamdeck.local` are conventional, configurable Steam Deck defaults rather than machine-specific values. Run the repository validator after every change to keep this true.
+
+### Install a selected skill
+
+List the available skills and inspect current installation state:
+
+```bash
+./scripts/manage-codex-skills list
+./scripts/manage-codex-skills status install-steam-shortcut
+```
+
+Install only the skill or skills the user selected:
+
+```bash
+./scripts/validate-codex-skills
+./scripts/manage-codex-skills install install-steam-shortcut
+```
+
+Pass multiple names to install several skills, or pass `all` only when the user explicitly selected the complete set. The installer uses `${CODEX_HOME:-$HOME/.codex}/skills` and creates absolute symbolic links back to this checkout. It never replaces an existing file, directory, or unrelated link. Start a new Codex session after installation so its skill catalog is refreshed.
+
+If `status` reports a conflict, compare the repository skill with the existing installation before changing anything:
+
+```bash
+diff -ru -- skills/install-steam-shortcut \
+  "${CODEX_HOME:-$HOME/.codex}/skills/install-steam-shortcut"
+```
+
+Show that diff and obtain approval before migrating or removing the existing destination.
+
+### Update and publish a skill
+
+Edit `skills/<skill-name>/` in this repository, not a detached copy. A managed installation is a link, so it reflects the edit immediately and `git diff` captures the update. Then run:
+
+```bash
+./scripts/validate-codex-skills
+bash -n scripts/manage-codex-skills
+git diff --check
+git status --short
+git diff -- skills/ scripts/manage-codex-skills README.md AGENTS.md
+```
+
+Also run the repository checks required by `AGENTS.md`; `systemd-analyze verify` is needed when a unit changes. Review the diff and personal-data scan before publishing. When the user has asked for the update to be committed and pushed:
+
+```bash
+git add skills scripts/manage-codex-skills scripts/validate-codex-skills README.md AGENTS.md
+git commit -m "Update Codex Steam shortcut skills"
+git branch -vv
+git push
+```
+
+If the current branch has no upstream, obtain approval before creating one with `git push --set-upstream origin HEAD`.
+
+To receive later repository updates, use `git pull --ff-only` in this checkout. The installed links need no copy or synchronization step.
+
 ## Install
 
 Run these commands from the repository root. They deploy the files but do **not** enable any system service.

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Install Steam Deck Game"
+  short_description: "Deploy games to a Steam Deck"
+  default_prompt: "Use $install-steamdeck-game to copy this game to my Steam Deck and add it to Steam."

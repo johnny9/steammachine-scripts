@@ -1,0 +1,4 @@
+interface:
+  display_name: "Install Steam Shortcut"
+  short_description: "Add local Steam shortcuts with art"
+  default_prompt: "Use $install-steam-shortcut to add this game to local Steam with suitable library artwork."

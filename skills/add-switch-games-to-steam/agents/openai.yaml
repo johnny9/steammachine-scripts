@@ -1,0 +1,4 @@
+interface:
+  display_name: "Add Switch Games to Steam"
+  short_description: "Add Eden Switch games to Steam with artwork"
+  default_prompt: "Use $add-switch-games-to-steam to add a Switch ROM as an individual Steam shortcut."
